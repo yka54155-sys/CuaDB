@@ -1,7 +1,11 @@
 #pragma once
+#include "Node.hpp"
 #include"Row.hpp"
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <ios>
 #include <iterator>
@@ -14,9 +18,61 @@ class Table
 {
     private:
     public:
-    uint32_t num_rows{0};
+    uint32_t root_page_num{0};//根节点类型的页的位置（？）
+    std::unique_ptr<Pager> pager;//页处理器实例
     
-    std::unique_ptr<Pager> pager;
+    void create_new_root()
+    {
+
+    }
+
+    void leaf_node_split_and_insert(uint32_t page_num,uint32_t cell_num,uint32_t key,const Row& r)
+    {
+        char* old_node = pager->get_page(page_num);
+        char* new_node = pager->get_page(pager->get_unused_page());
+        leaf_node_initialize(new_node);
+        for(int32_t i = LEAF_NODE_MAX_CELLS; i >= 0;--i)
+        {
+            char* destination_node;
+            if(i < LEAF_NODE_LEFT_SPLIT_COUNT)
+            {
+                destination_node = old_node;
+            }
+            else
+            {
+                destination_node = new_node;
+            }
+            uint32_t index_within_node = i % LEAF_NODE_LEFT_SPLIT_COUNT;
+            char* destination = leaf_node_cell(destination_node, index_within_node);
+            
+            if(i == cell_num)
+            {
+                serialize_row(leaf_node_value(destination_node, cell_num),r);
+            }
+            else if(i > cell_num)
+            {
+                std::memcpy(destination,leaf_node_cell(old_node,i - 1),LEAF_NODE_CELL_SIZE);
+            }
+            else 
+            {
+                std::memcpy(destination, leaf_node_cell(old_node, i), LEAF_NODE_CELL_SIZE);
+            }
+        }
+        leaf_node_write_num_cells(old_node, LEAF_NODE_RIGHT_SPLIT_COUNT);
+        leaf_node_write_num_cells(new_node, LEAF_NODE_LEFT_SPLIT_COUNT);
+
+        if(is_node_root(old_node))
+        {
+            create_new_root();
+            return;
+        }   
+        else 
+        {
+            throw std::runtime_error("Need to implement updating parent after split\n");
+            exit(1);
+        }
+    }
+
     class iterator
     {
         public:
@@ -26,17 +82,18 @@ class Table
         using pointer = Row*;
         using reference = Row;
         
-        iterator(Table& table,uint32_t row_num) : table(table),row_num(row_num)
+        iterator(Table& table,uint32_t page_num,uint32_t cell_num) : table(table),page_num(page_num),cell_num(cell_num)
         {
 
         }
         void write(const Row& r)
         {
-            serialize_row(slot(), &r);
-            if(this->row_num == table.num_rows)
+            if(leaf_node_read_num_cells(node()) >= LEAF_NODE_MAX_CELLS)
             {
-                table.num_rows++;
+                table.leaf_node_split_and_insert(page_num,cell_num,r.id,r);
+                return;
             }
+            leaf_node_insert(node(),  cell_num, r.id, r);
         }
         Row operator*() const
         {
@@ -46,35 +103,40 @@ class Table
         }
         iterator& operator++()
         {
-            row_num++;
+            cell_num++;
             return *this;
         }
         iterator operator++(int)
         {
             iterator old = *this;
-            row_num++;
+            cell_num++;
             return old;
         }
         bool operator!=(const iterator& other) const
         {
-            return this->row_num != other.row_num;
+            return this->cell_num != other.cell_num || this->page_num != other.page_num;
         }
         bool operator==(const iterator& other) const
         {
-            return this->row_num == other.row_num;
+            return this->cell_num == other.cell_num && this->page_num == other.page_num;
+        }
+        uint32_t key() const
+        {
+            assert(cell_num < leaf_node_read_num_cells(node()) && "Error , you can't use key() in end().");
+            return  leaf_node_read_key(node(), cell_num); 
         }
 
         private:
         Table& table;
-        uint32_t row_num;
-        char* slot() const
+        uint32_t page_num;
+        uint32_t cell_num;
+        char* node() const
         {
-            uint32_t page_num = row_num / ROWS_PER_PAGE;
-            char* page = table.pager->get_page(page_num);
-            uint32_t row_offset = row_num % ROWS_PER_PAGE;
-            uint32_t offset = row_offset * ROW_TOTAL_SIZE;
-            char* row_pos = page + offset;
-
+            return table.pager->get_page(page_num);
+        }
+        char* slot() const
+        {   
+            char* row_pos = leaf_node_value(node(),cell_num);
             return row_pos;
         }
 
@@ -84,39 +146,49 @@ class Table
     
     Table(const std::string& path)
     {
+        //实例化Pager打开数据库
         pager = std::make_unique<Pager>(path);
-        uint32_t full_pages = pager->get_file_length() / PAGE_SIZE;
-        uint32_t addition_row = (pager->get_file_length() - full_pages * PAGE_SIZE) / ROW_TOTAL_SIZE;
-        num_rows = full_pages * ROWS_PER_PAGE + addition_row;
-    }
+        
+        
+        root_page_num = 0;//将根页设为第0页
 
+        /*
+        如果当前数据库的实际页数为0
+        使用Pager->get_page 获取第0页地址
+        */
+        if(pager->num_pages == 0)
+        {
+            char* root = pager->get_page(0);//获取第0页地址来初始化根节点
+            leaf_node_initialize(root);//叶节点初始化函数，此处应该改为root_node_initialize[TODO]
+            root[IS_ROOT_OFFSET] = 1;//将根节点的头位置的IS_ROOT属性设置为1，意思是这个节点是根节点
+        }
+    }
 
     ~Table()
     {
-       
-        uint32_t full_num = num_rows / ROWS_PER_PAGE;
-        for(int i = 0 ;i < full_num;++i)
+        //析构时自动循环调用Pager的flush将缓存落盘
+        for(uint32_t i = 0 ;i < pager->num_pages;++i)
         {
-            uint32_t size = PAGE_SIZE;
-            pager->flush(i,size);
-        }
-        uint32_t addition_row = num_rows % ROWS_PER_PAGE;
-        if(addition_row > 0)
-        {
-            uint32_t size = addition_row * ROW_TOTAL_SIZE;
-            pager->flush(full_num, size);
-        }
-        
+            pager->flush(i);
+        }   
     }
     iterator begin()
     {
-        return iterator(*this,0);
+        return iterator(*this,root_page_num,0);
     }
     iterator end()
     {
-        return iterator(*this,num_rows);
+        return iterator(*this,root_page_num,leaf_node_read_num_cells(this->pager->get_page(root_page_num)));
     }
+    iterator find(uint32_t k)
+    {
+        char* node = pager->get_page(root_page_num);
+        if(node_type_read(node) != NodeType::LEAF)
+        {
+            throw std::runtime_error("Need to implement searching an internal node.");
+        }
 
-
-
+        uint32_t cell_num = leaf_node_find_idx(node, k);
+        return iterator(*this,root_page_num,cell_num);
+    }
 };
