@@ -1,7 +1,6 @@
 #include"../include/std.hpp"
 #include"../include/MetaCommand.hpp"
 #include"../include/Statement.hpp"
-#include"../include/Row.hpp"
 #include <cstdlib>
 #include <sstream>
 #include <string>
@@ -15,7 +14,7 @@ int main(int argc,char* argv[])
     std::string input;
     if(argc < 2)
     {
-        std::cerr << "Need DB Path argument.\n";
+        std::cerr << "usage:./CuaDB <DB file path>\n";
         return 1;
     }
     Table table(argv[1]);//初始化Table，设置页、表的大小
@@ -38,7 +37,7 @@ int main(int argc,char* argv[])
                 std::cout << meta.MetaMessage(result);
                 continue;
             }
-            result = meta.CommandExecute();//执行元命令
+            result = meta.CommandExecute(table);//执行元命令
             if(result == MetaResult::EXIT) break;
             // //debug
             // std::cout << meta.MetaMessage(result);//打印执行结果
@@ -47,7 +46,7 @@ int main(int argc,char* argv[])
         else //执行SQL语句
         {
             StatementResult result;//接收SQL执行结果
-            Statment s(input,result,table);//处理SQL语句
+            Statement s(input,result,table);//处理SQL语句
             if(result != StatementResult::SUCCESS)//判断SQL语句执行结果
             {
                 std::cout << s.PrintMessage(result);//打印错误信息
@@ -63,4 +62,3 @@ int main(int argc,char* argv[])
 
     return 0;
 }
-    

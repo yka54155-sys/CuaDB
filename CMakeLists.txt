@@ -16,7 +16,7 @@ add_executable(${PROJECT_NAME} ${SRC})
 if(MINGW)
     target_link_options(${PROJECT_NAME} PRIVATE -static-libgcc -static-libstdc++ -static)
 endif()
-target_include_directories(${PROJECT_NAME} PRIVATE ${PROJECT_SOURCE_DIR}/include {INCLUDEPATH})
+target_include_directories(${PROJECT_NAME} PRIVATE ${PROJECT_SOURCE_DIR}/include)
 target_link_directories(${PROJECT_NAME} PRIVATE  ${PROJECT_SOURCE_DIR}/lib)
 # target_link_libraries(${PROJECT_NAME} PRIVATE ${PROJECT_SOURCE_DIR}/lib/)
 
