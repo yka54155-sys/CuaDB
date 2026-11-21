@@ -10,8 +10,6 @@
 include/        头文件：页布局与节点、表与迭代器、SQL 语句、元命令
 src/main.cpp    程序入口与 REPL
 test/           独立测试工程
-bin/            编译产物（已忽略）
-build/          构建目录（已忽略）
 ```
 
 ## 构建
@@ -65,7 +63,7 @@ CuaDB > .exit
 - [x] 页落盘（退出时整体 flush）
 - [x] 行序列化 / 反序列化（293 字节定长，不含 padding）
 - [x] 头文件契约注释：Row、Pager、Statement、MetaCommand
-- [ ] 头文件契约注释：Node、Table
+- [X] 头文件契约注释：Node、Table
 - [ ] 100 字节文件头（魔数、页大小、页数、变更计数器）
 - [ ] 页号越界与跳号检查
 
