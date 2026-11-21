@@ -101,8 +101,10 @@ class Table
             //如果是的话则直接使用序列化在对应地址写入cell
             if(i == cell_num)
             {
-                //[WARNING]缺少写入key值逻辑
-                serialize_row(leaf_node_value(destination_node, cell_num),r);//[WARNING]此处应该使用index_within_node而不是cell_num
+                //写入key值
+                leaf_node_write_key(destination_node, index_within_node,  key);
+                //写入value值
+                serialize_row(leaf_node_value(destination_node, index_within_node),r);
             }
 
             //如果当前位置在需要插入的位置的后面
