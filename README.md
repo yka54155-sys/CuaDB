@@ -6,9 +6,12 @@
 ## 目标
 补完 B+ 树分裂：内部节点访问器 → 根分裂 → 父节点挂接 → 内部节点分裂 → 递归查找
 
+## 下一步
+`Table::create_new_root()`实现：第0页分裂时重新分配页并改造第0页指向两个子页
+
 ## 当前卡点
-- [ ] `Table.hpp` , `Node.hpp` 注释不完整 `[DOING]`
-- [ ] `Table::create_new_root()` 为空实现
+- [X] `Table.hpp` , `Node.hpp` 注释不完整
+- [ ] `Table::create_new_root()` 为空实现`[DOING]`
 - [ ] 插入第 14 行 → SIGABRT（core dumped）
 - [ ] `.btree` 只打印根页，无法验证多层结构
 
