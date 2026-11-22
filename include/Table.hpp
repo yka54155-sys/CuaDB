@@ -28,6 +28,48 @@
 class Table
 {
     private:
+    /**
+     * @brief 返回指定页中的最大的key值
+     * @details 逻辑：
+                先进行判定，如果是内部节点，则递归调用本函数，参数为内部节点的right child，
+                如果是叶节点，则返回num cells - 1位置的key值
+     * @param page_num 页号
+     * @return uint32_t 最大key值
+     */
+    uint32_t get_max_key(uint32_t page_num)
+    {
+        //page num必须合法
+        assert((page_num != INVALID_PAGE_NUM)&&"Table::get_max_key: page num is INVALID_PAGE_NUM");
+
+        //获取节点指针
+        char* node = pager->get_page(page_num);
+        
+        //获取节点类型
+        NodeType type = read_node_type(node);
+        
+        //如果是内部节点
+        if(type == NodeType::INTERNAL)
+        {
+            //内部节点中最大key值在right child中
+            //因此直接递归调用进入right child
+            uint32_t right_child = internal_node_read_right_child(node);
+            return get_max_key(right_child);
+        }
+        //如果是叶节点
+        if(type == NodeType::LEAF)
+        {
+            //叶节点中最大key值就是最后一个cell的key
+            //先用num cells获取最后一个cell的后一个位置
+            //将num cells - 1获取到最后一个cell的位置
+            uint32_t num_cells = leaf_node_read_num_cells(node);
+            assert((num_cells > 0) && "Table::get_max_key: leaf node is empty.");
+            return leaf_node_read_key(node, num_cells - 1);
+        }
+
+        throw std::runtime_error("Table::get_max_key: Unknown node type.");
+    }
+
+
     public:
     uint32_t root_page_num{0};//根节点页的位置
     std::unique_ptr<Pager> pager;//页处理器实例
@@ -307,8 +349,6 @@ class Table
             char* row_pos = leaf_node_value(node(),cell_num);
             return row_pos;
         }
-
-
     };
 
     
