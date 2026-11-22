@@ -57,7 +57,7 @@ class Table
         char* old_node = pager->get_page(page_num);//获取当前页地址
         char* new_node = pager->get_page(pager->get_unused_page());//获取一个还没使用的页的地址
 
-        leaf_node_initialize(new_node);//初始化一下新创建的页，初始化为leaf
+        leaf_node_initialize(new_node,{.parent_pointer = read_parent_pointer(old_node)});//新页与旧页是兄弟（同一层），父指针直接抄旧页；根分裂时这里继承 INVALID，随后由 create_new_root 改成根页号
 
         //迁移cell，逻辑：
         //从旧页的最后一个cell开始迁移，依次往上
@@ -332,8 +332,7 @@ class Table
         if(pager->num_pages == 0)
         {
             char* root = pager->get_page(0);//获取第0页地址来初始化根节点
-            leaf_node_initialize(root);//叶节点初始化函数，此处应该改为root_node_initialize[TODO]
-            root[IS_ROOT_OFFSET] = 1;//将根节点的头位置的IS_ROOT属性设置为1，意思是这个节点是根节点
+            leaf_node_initialize(root,{.is_root = true,.parent_pointer = INVALID_PAGE_NUM,.num_cells = 0});//新建库：第0页初始化为空叶子并设为根；后两个参数就是默认值，可简写为 {.is_root = true}
         }
     }
 
@@ -390,7 +389,7 @@ class Table
 
         //判断节点类型
         //目前只实现了leaf node的查询操作
-        if(node_type_read(node) != NodeType::LEAF)
+        if(read_node_type(node) != NodeType::LEAF)
         {
             throw std::runtime_error("Need to implement searching an internal node.");
         }

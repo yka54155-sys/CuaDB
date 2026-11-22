@@ -2,8 +2,10 @@
 #include"std.hpp"
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include"Row.hpp"
+
 /**
  * @brief 此文件是CuaDB项目有关Node的函数、常量的定义头文件
  * @details Node有两种：
@@ -67,6 +69,12 @@
   */
 
 /**
+ * @brief 用于作为根节点parent pointer的常量，正常情况下不可达
+ * 
+ */
+constexpr uint32_t INVALID_PAGE_NUM = std::numeric_limits<uint32_t>::max();
+
+/**
  * @brief 两种节点的枚举，Internal是0，Leaf是1
  * @details uint8_t格式，只占1字节
  */
@@ -119,7 +127,7 @@ constexpr uint32_t LEAF_NODE_MAX_CELLS = LEAF_NODE_SPACE_FOR_CELLS / LEAF_NODE_C
  * @details 用计算的方法得出，更加健壮
  */
 constexpr uint32_t LEAF_NODE_RIGHT_SPLIT_COUNT = (LEAF_NODE_MAX_CELLS + 1) / 2;//右节点的cell数量：（13 + 1） / 2 = 7
-constexpr uint32_t LEAF_NODE_LEFT_SPLIT_COUNT = (LEAF_NODE_MAX_CELLS + 1) - LEAF_NODE_RIGHT_SPLIT_COUNT;//左节点：14 - 7 = 7。用总数减右侧，保证元素数为偶数时多出的一个落在左边
+constexpr uint32_t LEAF_NODE_LEFT_SPLIT_COUNT = (LEAF_NODE_MAX_CELLS + 1) - LEAF_NODE_RIGHT_SPLIT_COUNT;//左节点：14 - 7 = 7。用总数+1减右侧，保证元素数为偶数时多出的一个落在左边
 
 //Internal node header
 /**
@@ -146,7 +154,10 @@ constexpr uint32_t INTERNAL_NODE_KEY_OFFSET = 0;//key在cell中的相对偏移�
 constexpr uint32_t INTERNAL_NODE_CHILD_SIZE = sizeof(uint32_t);//child的大小： 4字节，指向一个由该节点管理的leaf node
 constexpr uint32_t INTERNAL_NODE_CHILD_OFFSET = INTERNAL_NODE_KEY_OFFSET + INTERNAL_NODE_KEY_SIZE;//child在cell中的相对偏移量：0 + 4 = 4（是相对 cell，不是相对 node）
 constexpr uint32_t INTERNAL_NODE_CELL_SIZE = INTERNAL_NODE_KEY_SIZE + INTERNAL_NODE_CHILD_SIZE;//单个cell的大小：4+4=8字节
+constexpr uint32_t INTERNAL_NODE_MAX_CELLS = (PAGE_SIZE - INTERNAL_NODE_HEADER_SIZE) / INTERNAL_NODE_CELL_SIZE;
 
+constexpr uint32_t INTERNAL_NODE_SPLIT_RIGHT_COUNT = INTERNAL_NODE_MAX_CELLS / 2;
+constexpr uint32_t INTERNAL_NODE_SPLIT_LEFT_COUNT = (INTERNAL_NODE_MAX_CELLS + 1) - INTERNAL_NODE_SPLIT_RIGHT_COUNT;
 
 //Read/Write uint32 in raw memory
 /**
@@ -197,6 +208,77 @@ inline void u8_write(char* p,uint8_t v)
     std::memcpy(p,&v,sizeof(v));
 }
 
+//Node type Read/Write
+/**
+ * @brief 读取一个节点的NodeType类型，返回值为NodeType枚举值
+ * 
+ * @param node 读取的节点
+ * @return NodeType 返回NodeType::LEAF / NodeType::INTERNAL
+ */
+inline NodeType read_node_type(const char* node)
+{
+    return static_cast<NodeType>(u8_read(node + NODE_TYPE_OFFSET));
+}
+
+/**
+ * @brief 写入一个节点的NodeType
+ * 
+ * @param node 写入的节点
+ * @param type NodeType类类型
+ */
+inline void write_node_type(char* node,NodeType type)
+{
+    u8_write(node + NODE_TYPE_OFFSET, static_cast<uint8_t>(type));
+}
+
+
+/**
+ * @brief 判断一个节点是否为root
+ * 
+ * @param node 判断的节点
+ * @return true 是root
+ * @return false 不是root
+ */
+inline bool read_is_root(const char* node)
+{
+    return u8_read(node + IS_ROOT_OFFSET);
+}
+
+/**
+ * @brief 写入一个节点的is root属性
+ * 
+ * @param node 写入的节点
+ * @param is_root 写入的内容，true：是root ；false：不是root
+ */
+inline void write_is_root(char* node,bool is_root)
+{
+    u8_write(node + IS_ROOT_OFFSET, is_root ? 1 : 0);
+}
+
+/**
+ * @brief 读取parent pointer值
+ * 
+ * @param node 需要读取的node
+ * @return uint32_t parent pointer值
+ */
+inline uint32_t read_parent_pointer(const char* node)
+{
+    return u32_read(node + PARENT_POINTER_OFFSET);
+}
+
+/**
+ * @brief 写入parent pointer值
+ * 
+ * @param node 写入的节点
+ * @param parent_num 写入的parent pointer值
+ */
+inline void write_parent_pointer(char* node,uint32_t parent_num)
+{
+    u32_write(node + PARENT_POINTER_OFFSET, parent_num);
+}
+
+
+
 //Leaf node NUM_CELLS read/write
 /**
  * @brief leaf node的header中的num cells属性的读取函数
@@ -222,7 +304,8 @@ inline void leaf_node_write_num_cells(char* node,uint32_t v)
 
 //Leaf node seek cell position 
 /**
- * @brief 获取节点内第 cell_num 个 cell 的地址
+ * @brief 获取节点内编号为cell_
+ num cell 的地址
  * @details cell 从 0 开始编号。cell_num == num_cells 表示“最后一个 cell 之后的位置”，
  *          只能用于追加，不能当作已有 cell 读取
  * @param node 这个cell所在的node指针
@@ -282,26 +365,31 @@ inline char* leaf_node_value(char* node,uint32_t cell_num)
 
 //Leaf node initialize
 /**
- * @brief 将一个节点初始化并设置为leaf node
- * 
- * @param node 需要初始化的节点
+ * @brief leaf node 初始化参数的默认值
+ * @details 用 C++20 指定初始化器调用，例如 leaf_node_initialize(node, { .is_root = true })
  */
-inline void leaf_node_initialize(char* node)
+struct LeafNodeInit
 {
-    //使用node[NODE_TYPE_OFFSET]也就是把整个地址块当成char数组直接操作NODE_TYPE_OFFSET位置
-    //将NodeType::LEAF,强制转换成char写入
-    node[NODE_TYPE_OFFSET] = static_cast<char>(NodeType::LEAF);
-    //与NODE_TYPE相同操作方式
-    node[IS_ROOT_OFFSET]  = 0;
+    bool     is_root        = false;                  ///< 是否为根；根页填 true
+    uint32_t parent_pointer = INVALID_PAGE_NUM;       ///< 父页号；根必须是 INVALID_PAGE_NUM
+    uint32_t num_cells      = 0;                      ///< 初始 cell 数量，新页填 0
+};
 
-    //用u32_write将node的PARENT_POINTER写为0
-    //这里不用node[]来操作的原因是node[]只能用来操作单字节的地址
-    //PARENT_POINTER为4字节大小
-    //NODE_TYPE和IS_ROOT_OFFSET都是单字节，因此可以用node[]
-    u32_write(node + PARENT_POINTER_OFFSET, 0);
-    
-    //将node的num cells初始化为0
-    leaf_node_write_num_cells(node, 0);
+/**
+ * @brief 将一个节点初始化并设置为 leaf node
+ * @details 按 opt 依次写入 type=LEAF、is_root、parent_pointer、num_cells。
+ *          省略 opt 时得到“空叶子”：is_root=0、parent=INVALID、num_cells=0。
+ *          分裂产生的兄弟页应传 `.parent_pointer = read_parent_pointer(旧页)`，
+ *          这样它与旧页同父。
+ * @param node 需要初始化的节点
+ * @param opt  初始化参数，省略时全部取默认值
+ */
+inline void leaf_node_initialize(char* node,const LeafNodeInit& opt = {})
+{
+    write_node_type(node, NodeType::LEAF);
+    write_is_root(node, opt.is_root);
+    write_parent_pointer(node, opt.parent_pointer);
+    leaf_node_write_num_cells(node, opt.num_cells);
 }
 
 //Leaf node insert
@@ -345,28 +433,6 @@ inline void leaf_node_insert(char* node, uint32_t cell_num,uint32_t key,const Ro
     serialize_row(leaf_node_value(node, cell_num),r);
 }
 
-//Node type Read/Write
-/**
- * @brief 读取一个节点的NodeType类型，返回值为NodeType枚举值
- * 
- * @param node 读取的节点
- * @return NodeType 返回NodeType::LEAF / NodeType::INTERNAL
- */
-inline NodeType node_type_read(const char* node)
-{
-    return static_cast<NodeType>(u8_read(node + NODE_TYPE_OFFSET));
-}
-
-/**
- * @brief 写入一个节点的NodeType
- * 
- * @param node 写入的节点
- * @param type NodeType类类型
- */
-inline void node_type_write(char* node,NodeType type)
-{
-    u8_write(node + NODE_TYPE_OFFSET, static_cast<uint8_t>(type));
-}
 
 //Leaf node find key index
 /**
@@ -442,27 +508,201 @@ inline void leaf_node_print(char* node)
     }
     
 }
-
 /**
- * @brief 判断一个节点是否为root
+ * @brief 读取internal node的num keys值
  * 
- * @param node 判断的节点
- * @return true 是root
- * @return false 不是root
+ * @param node 读取的节点指针
+ * @return uint32_t num keys值
  */
-inline bool read_is_root(const char* node)
+inline uint32_t internal_node_read_num_keys(const char* node)
 {
-    return u8_read(node + IS_ROOT_OFFSET);
+    return u32_read(node + INTERNAL_NODE_NUM_KEYS_OFFSET);
 }
 
 /**
- * @brief 写入一个节点的is root属性
+ * @brief 写入num keys值
  * 
- * @param node 写入的节点
- * @param is_root 写入的内容，true：是root ；false：不是root
+ * @param node 写入的node指针
+ * @param num 写入的值
  */
-inline void write_is_root(char* node,bool is_root)
+inline void internal_node_write_num_keys(char* node,uint32_t num)
 {
-    u8_write(node + IS_ROOT_OFFSET, is_root ? 1 : 0);
+    u32_write(node + INTERNAL_NODE_NUM_KEYS_OFFSET, num);
 }
 
+/**
+ * @brief 读取 internal node 的 right child（最右孩子页号）
+ * @param node 读取的节点指针
+ * @return uint32_t 页号；未设置时可能是 INVALID_PAGE_NUM
+ */
+inline uint32_t internal_node_read_right_child(const char* node)
+{
+    return u32_read(node + INTERNAL_NODE_RIGHT_CHILD_OFFSET);
+}
+
+/**
+ * @brief 写入 internal node 的 right child（最右孩子页号）
+ * @param node 写入的node指针
+ * @param page_num 孩子页号，必须是一个已分配的真实页
+ */
+inline void internal_node_write_right_child(char* node,uint32_t page_num)
+{
+    u32_write(node + INTERNAL_NODE_RIGHT_CHILD_OFFSET, page_num);
+}
+
+/**
+ * @brief 获取 internal node 第 cell_num 个 cell 的地址
+ * @details 内部节点头 14 字节，每个 cell 8 字节（key 4 + child 4）：
+ *          地址 = node + INTERNAL_NODE_HEADER_SIZE + cell_num * INTERNAL_NODE_CELL_SIZE
+ * @param node 节点页地址
+ * @param cell_num 第几个 cell，从 0 开始；合法范围 [0, num_keys]
+ * @return char* cell 的起始地址（key 在这个地址，child 在 +4）
+ * @warning 不做边界检查，传 num_keys 表示“追加位置”，不能当作已有 cell 读取
+ */
+inline char* internal_node_cell(char* node,uint32_t cell_num)
+{
+    return node + INTERNAL_NODE_HEADER_SIZE + cell_num * INTERNAL_NODE_CELL_SIZE;
+}
+
+/**
+ * @brief 读取第 cell_num 个 cell 的分界键
+ * @param node 节点页地址
+ * @param cell_num 第几个 cell，必须 < num_keys
+ * @return uint32_t 该 cell 的 key，等于其左子树的最大键
+ */
+inline uint32_t internal_node_read_key(char* node,uint32_t cell_num)
+{
+    return u32_read(internal_node_cell(node, cell_num));    
+}
+
+/**
+ * @brief 写入第 cell_num 个 cell 的分界键
+ * @param node 节点页地址
+ * @param cell_num 第几个 cell
+ * @param k 新的分界键，应等于该 cell 左子树的最大键
+ */
+inline void internal_node_write_key(char* node,uint32_t cell_num,uint32_t k)
+{
+    u32_write(internal_node_cell(node,cell_num), k);
+}
+
+/**
+ * @brief 读取第 cell_num 个 cell 的左孩子页号
+ * @param node 节点页地址
+ * @param cell_num 第几个 cell，必须 < num_keys
+ * @return uint32_t 孩子节点的页号
+ */
+inline uint32_t internal_node_read_child(char* node,uint32_t cell_num)
+{
+    return u32_read(internal_node_cell(node, cell_num) + INTERNAL_NODE_CHILD_OFFSET);
+}
+
+/**
+ * @brief 写入第 cell_num 个 cell 的左孩子页号
+ * @param node 节点页地址
+ * @param cell_num 第几个 cell
+ * @param page_num 孩子页号，必须是已分配的真实页
+ */
+inline void internal_node_write_child(char* node,uint32_t cell_num,uint32_t page_num)
+{
+    u32_write(internal_node_cell(node,cell_num) + INTERNAL_NODE_CHILD_OFFSET, page_num);
+}
+
+/**
+ * @brief internal node 初始化参数的默认值
+ * @details 用 C++20 指定初始化器调用，例如 internal_node_initialize(node, { .is_root = true })
+ * @warning right_child 默认是 INVALID_PAGE_NUM 而不是 0：
+ *          0 是根页号，写成 0 会让“键比所有 key 都大”的查找绕回根节点，形成死循环
+ */
+ struct InternalNodeInit
+ {
+    bool     is_root        = false;                  ///< 是否为根
+    uint32_t parent_pointer = INVALID_PAGE_NUM;       ///< 父页号；根必须是 INVALID_PAGE_NUM
+    uint32_t num_keys       = 0;                      ///< 初始 key 数量，新页填 0
+    uint32_t right_child    = INVALID_PAGE_NUM;       ///< 最右孩子页号，调用方必须设成真实页
+ };
+
+/**
+ * @brief 将一个节点初始化为 internal 类型
+ * @details 按 opt 依次写入 type=INTERNAL、is_root、parent_pointer、num_keys、right_child。
+ *          省略 opt 时得到“空内部节点”，它还不能参与查找：调用方必须紧接着设置
+ *          right_child 和 cell0，否则查找会走到 INVALID_PAGE_NUM。
+ * @param node 需要初始化的节点
+ * @param opt  初始化参数，省略时全部取默认值
+ */
+inline void internal_node_initialize(char* node,const InternalNodeInit& opt = {})
+{
+    write_node_type(node, NodeType::INTERNAL);
+    write_is_root(node, opt.is_root);
+
+    //根没有父节点；非根节点的 parent 由调用方在挂到父页之后再写
+    write_parent_pointer(node, opt.parent_pointer);
+
+    internal_node_write_num_keys(node, opt.num_keys);
+    internal_node_write_right_child(node, opt.right_child);
+}
+
+/**
+ * @brief 在 internal node 的第 cell_num 个位置插入一个 cell（key + child）
+ * @details 插入位置在中间时，先把 [cell_num, num_keys) 的 cell 整体右移一格，
+ *          再写入新的 key 与 child，最后把 num_keys 加一。
+ *          必须倒序搬移，否则同一页内会覆盖还没搬的源数据。
+ * @param node 节点页地址
+ * @param cell_num 插入位置，范围 [0, num_keys]；等于 num_keys 表示追加到末尾
+ * @param key 新 cell 的分界键，应等于其左子树的最大键
+ * @param child 新 cell 的左孩子页号
+ * @pre 调用前该节点的 num_keys 必须小于 INTERNAL_NODE_MAX_CELLS（已满应先分裂）
+ * @post num_keys 加一，第 cell_num 格变为新 cell，其后的 cell 全部右移一格
+ */
+inline void internal_node_insert(char* node,uint32_t cell_num,uint32_t key,uint32_t child)
+{
+    uint32_t num_keys = internal_node_read_num_keys(node);
+    if(cell_num < num_keys)
+    {
+        for(uint32_t i = num_keys;i > cell_num;--i)
+        {
+            std::memcpy(internal_node_cell(node,i),internal_node_cell(node,i - 1),INTERNAL_NODE_CELL_SIZE);
+        }
+    }
+
+    internal_node_write_num_keys(node, num_keys + 1);
+    internal_node_write_key(node, cell_num, key);
+    internal_node_write_child(node, cell_num, child);
+}
+
+/**
+ * @brief 在 internal node 中按 key 二分定位，返回该走哪个孩子
+ * @details 返回的是「第一个 key >= k 的 cell 下标」。调用方按它取孩子：
+ *          idx < num_keys  → 走 internal_node_read_child(node, idx)
+ *          idx == num_keys → 走 right_child（所有 key 都比它小）
+ * @param node 节点页地址
+ * @param k 要查找的键
+ * @return uint32_t cell 下标，范围 [0, num_keys]
+ */
+inline uint32_t internal_node_find_idx(char* node,uint32_t k)
+{
+    uint32_t num_keys = internal_node_read_num_keys(node);
+    uint32_t left = 0;
+    uint32_t right = num_keys;
+    while(left != right)
+    {
+        uint32_t mid = (left + right) / 2;
+        uint32_t mid_key = internal_node_read_key(node, mid);
+        if(mid_key == k)
+        {
+            return mid;
+        }
+
+        if(mid_key < k)
+        {
+            left = mid + 1;
+        }
+
+        if (mid_key > k)
+        {
+            right = mid;
+        }
+    }
+
+    return left;
+}
