@@ -2,6 +2,8 @@
 #include"../include/MetaCommand.hpp"
 #include"../include/Statement.hpp"
 #include <cstdlib>
+#include <exception>
+#include <iostream>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -45,16 +47,26 @@ int main(int argc,char* argv[])
         }
         else //执行SQL语句
         {
-            StatementResult result;//接收SQL执行结果
-            Statement s(input,result,table);//处理SQL语句
-            if(result != StatementResult::SUCCESS)//判断SQL语句执行结果
+            
+            try 
             {
-                std::cout << s.PrintMessage(result);//打印错误信息
+                StatementResult result;//接收SQL执行结果
+                Statement s(input,result,table);//处理SQL语句
+                if(result != StatementResult::SUCCESS)//判断SQL语句执行结果
+                {
+                    std::cout << s.PrintMessage(result);//打印错误信息
+                    continue;
+                }
+                result = s.Execute();
+                // //debug
+                std::cout << s.PrintMessage(result);//测试用
+            } catch (const std::exception& e) 
+            {
+                std::cerr << e.what();
                 continue;
             }
-            result = s.Execute();
-            // //debug
-            std::cout << s.PrintMessage(result);//测试用
+            
+            
         }
         
     }
