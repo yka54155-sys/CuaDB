@@ -345,7 +345,6 @@ class Table
             //使用运行期断言
             //如果迭代器指向的cell的编号超出迭代器指向的节点实际拥有的cell数量
             //直接报错（release 构建下 assert 被移除）
-
             assert(cell_num < leaf_node_read_num_cells(node()) && "Error , you can't use key() in end().");
             return  leaf_node_read_key(node(), cell_num); 
         }
@@ -441,7 +440,20 @@ class Table
         //然后用leaf_node_read_num_cells获取root页中的num cells的值
         //因为num cells值代表数量，所以第num cells个cell的位置就是最后一个cell的后一个位置
         //举例：5个苹果，数量是5，编号为0、1、2、3、4，那么编号为‘数量’的位置就是最后一个位置的后一个
-        return iterator(*this,root_page_num,leaf_node_read_num_cells(this->pager->get_page(root_page_num)));
+
+        uint32_t page = root_page_num;
+
+        while(true)
+        {
+            char* node = pager->get_page(page);
+            if(read_node_type(node) == NodeType::LEAF)
+            {
+                return iterator(*this,page,leaf_node_read_num_cells(node));
+            }
+            page = internal_node_read_right_child(node);
+        }
+        
+        
     }
 
     /**
@@ -452,20 +464,40 @@ class Table
      */
     iterator find(uint32_t k)
     {
-        //先获取当前节点的地址
-        char* node = pager->get_page(root_page_num);
-
-        //判断节点类型
-        //目前只实现了leaf node的查询操作
-        if(read_node_type(node) != NodeType::LEAF)
+        //使用迭代方法，逐层寻找cell位置
+        uint32_t page_num = root_page_num;//从根开始
+        while(true)
         {
-            throw std::runtime_error("Need to implement searching an internal node.");
+            char* node = pager->get_page(page_num);
+            
+            //如果当前节点是leaf node，那么直接查找对应的cell位置并返回即可
+            if(read_node_type(node) == NodeType::LEAF)
+            {
+                uint32_t cell_num = leaf_node_find_idx(node, k);
+                return iterator(*this,page_num,cell_num);
+            }
+
+            //如果当前节点不是leaf
+            //先用internal的find idx找到k对应的leaf node
+            //如果是多层internal那么将child设为page num继续迭代逐层查找
+            uint32_t cell_num = internal_node_find_idx(node, k);//找到k应该在的位置
+            
+            //如果找到的位置等于num keys
+            //也就是大于所有的cell
+            //那么应该在right child里
+            if(cell_num == internal_node_read_num_keys(node))
+            {
+                page_num = internal_node_read_right_child(node);
+            }
+            //如果在所有cell里定位到了k应该在的位置
+            //那么下一个查询的page就是找到的这个cell对应的child页
+            else
+            {
+                page_num = internal_node_read_child(node, cell_num);    
+            }
         }
+        throw std::runtime_error("Table::find(): Unknown Error!");
 
-        //使用leaf_node_find_idx获取cell的编号
-        uint32_t cell_num = leaf_node_find_idx(node, k);
-
-        //使用获取到的编号创建迭代器并返回
-        return iterator(*this,root_page_num,cell_num);
+        
     }
 };

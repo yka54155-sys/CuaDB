@@ -442,7 +442,7 @@ inline void leaf_node_insert(char* node, uint32_t cell_num,uint32_t key,const Ro
  * @param k 使用k来查找cell
  * @return uint32_t cell在所在的node中的编号
  */
-inline uint32_t leaf_node_find_idx(char* node,uint32_t k)
+[[nodiscard]]inline uint32_t leaf_node_find_idx(char* node,uint32_t k)
 {
     //获取cell数量
     uint32_t num_cells = leaf_node_read_num_cells(node);
