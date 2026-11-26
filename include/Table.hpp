@@ -36,7 +36,7 @@ class Table
      * @param page_num 页号
      * @return uint32_t 最大key值
      */
-    uint32_t get_max_key(uint32_t page_num)
+    [[nodiscard]]uint32_t get_max_key(uint32_t page_num)
     {
         //page num必须合法
         assert((page_num != INVALID_PAGE_NUM)&&"Table::get_max_key: page num is INVALID_PAGE_NUM");
@@ -69,20 +69,47 @@ class Table
         throw std::runtime_error("Table::get_max_key: Unknown node type.");
     }
 
+    /**
+     * @brief 创建新的根节点，把当前根页改造成内部节点
+     * @details 步骤：
+     *          ① 分配一个新页，整页拷贝根页内容，作为新根的「左孩子」（原数据左半）；
+     *          ② 左孩子的 is_root 置 0、parent 指向根页；
+     *          ③ 传入的 right_child（分裂产生的右半页）parent 也指向根页；
+     *          ④ 根页原地重新初始化为 INTERNAL：num_keys=1、cell0=(左孩子最大键, 左孩子)、right_child=右半页。
+     * @param right_child 新根的 right child 页号，即分裂产生的右半页
+     * @pre 根页（root_page_num）当前的 num_cells 是分裂后的左半数据，且尚未变成内部节点
+     * @post 根页类型变为 INTERNAL、is_root=1、parent=INVALID_PAGE_NUM；
+     *       左孩子与右孩子的 parent 都等于 root_page_num
+     * @note 根页号固定为 0，因此不需要“以哪个节点为主”的参数
+     */
+    void create_new_root(uint32_t right_child)
+    {
+        //获取未使用的页
+        uint32_t new_page = pager->get_unused_page();
+        char* new_node = pager->get_page(new_page);
+        char* zero_node = pager->get_page(root_page_num);
+        char* right_child_node = pager->get_page(right_child);
+        //迁移0页的内容
+       std::memcpy(new_node,zero_node,PAGE_SIZE);
+        //更改新叶节点的is root、parent pointer
+        write_is_root(new_node, false);
+        write_parent_pointer(new_node, root_page_num);
+        //更改right child的parent pointer
+        write_parent_pointer(right_child_node, root_page_num);
+        //将0页初始化为root node
+        internal_node_initialize(zero_node,{.is_root = true,.num_keys = 1,.right_child = right_child});
+        //使用get_max_key设置新root的唯一cell
+        uint32_t cell_key = get_max_key(new_page);
+        internal_node_write_key(zero_node, 0,cell_key);
+        internal_node_write_child(zero_node,0,new_page);
+    }
+
 
     public:
     uint32_t root_page_num{0};//根节点页的位置
     std::unique_ptr<Pager> pager;//页处理器实例
     
-    /**
-     * @brief 创建一个新的根节点[TODO]
-     * @todo 待实现
-     * 
-     */
-    void create_new_root()
-    {
 
-    }
 
     /**
      * @brief 叶节点分裂并插入函数
@@ -97,7 +124,8 @@ class Table
     {
         //分裂
         char* old_node = pager->get_page(page_num);//获取当前页地址
-        char* new_node = pager->get_page(pager->get_unused_page());//获取一个还没使用的页的地址
+        uint32_t new_page_num = pager->get_unused_page();//保存新节点的页号，用于创建新root node时作为right child传入
+        char* new_node = pager->get_page(new_page_num);//获取一个还没使用的页的地址
 
         leaf_node_initialize(new_node,{.parent_pointer = read_parent_pointer(old_node)});//新页与旧页是兄弟（同一层），父指针直接抄旧页；根分裂时这里继承 INVALID，随后由 create_new_root 改成根页号
 
@@ -176,7 +204,7 @@ class Table
         if(read_is_root(old_node))
         {
             //创建新的根节点   
-            create_new_root();
+            create_new_root(new_page_num);
             return;
         }
         //如果旧节点不是根节点
