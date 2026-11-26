@@ -283,19 +283,23 @@ class Table
 
         /**
          * @brief 前置++，++it
-         * 
+         * @details 目前只在当前叶子内部前进一格
+         * @warning 不跨页：走到本叶的 num_cells 之后不会自动跳到下一个叶子，
+         *          而是停在一个"叶内尾后"的位置。跨页需要叶子记录 next_leaf，
+         *          或者迭代器内部维护"从根到叶"的路径栈
          * @return iterator& 返回操作后的迭代器
          */
         iterator& operator++()
         {
-            //直接将迭代器前进一步后返回
+            //单页内前进一格；跨页逻辑尚未实现（见上方 @warning）
             cell_num++;
             return *this;
         }
 
         /**
          * @brief 后置++，it++
-         * 
+         * @details 语义同前置++，只是返回前进前的副本
+         * @warning 同样不跨页
          * @return iterator 返回的是++前的值，不是索引
          */
         iterator operator++(int)
@@ -336,8 +340,10 @@ class Table
 
         /**
          * @brief 获取当前迭代器指向的cell的key值
-         * @warning 使用运行期断言 assert 判断越界（NDEBUG 构建下失效）
-          *          在 end() 之外的非法位置调用同样会触发断言
+         * @pre 迭代器必须指向一个真实存在的 cell；对 end()，或对"指向叶内
+         *      num_cells（最后一个 cell 之后）"的位置调用都属于误用
+         * @warning 用运行期断言 assert 检查越界；NDEBUG 构建下断言失效，
+         *          越界读会读到陈旧字节而不会报错
          * @return uint32_t key值
          */
         uint32_t key() const
@@ -415,9 +421,11 @@ class Table
     }
 
     /**
-     * @brief 供迭代器使用的begin()
-     * @details 目前指向root页的0号cell
-     * @warning 假设根节点是叶子；根变成内部节点后，应改为指向最左叶子的第一个cell
+     * @brief 供迭代器使用的begin()，指向整张表的第一个 cell
+     * @details 直接返回 (root_page_num, 0)
+     * @warning 仍然假设根节点是叶子：根变成内部节点后，(root, 0) 落在内部节点的
+     *          第 0 条 cell 上，不是数据行。正确做法是沿 child[0] 一路下到最左叶子，
+     *          与迭代器跨页一起实现
      * @return iterator 
      */
     iterator begin()
@@ -427,17 +435,19 @@ class Table
     }
 
     /**
-     * @brief 供迭代器使用的end()
-     * @details 目前指向root页的最后一个cell的后一个位置
-     * @warning 假设根节点是叶子。根一旦变成内部节点（发生过分裂），
-     *          这里读到的是 num_keys 而不是 num_cells，语义是错的；
-     *          正确做法是沿最右孩子一路找到最后一个叶子
+     * @brief 供迭代器使用的end()，指向整张表最后一个 cell 之后的位置
+     * @details 从根出发，内部节点反复取 right_child，直到遇到叶子；
+     *          返回 (该叶子页号, num_cells)，即"最后一个 cell 的后一个位置"
+     * @note 这个位置与 find() 在"k 大于全表最大值"时给出的插入位置**恰好相同**，
+     *       所以 Statement 里 `pos != end()` 能正确短路掉 key()，不必加魔法值兜底。
+     *       该性质依赖"没有删除 / 节点合并"：一旦实现 delete，num_cells 位置会
+     *       出现在非最右叶子上，届时必须改用哨兵 INVALID_PAGE_NUM 表示 end()
      * @return iterator 
      */
     iterator end()
     {
-        //使用pager的get_page获取root页的地址
-        //然后用leaf_node_read_num_cells获取root页中的num cells的值
+        //从根页出发，沿 right_child 一路向下，直到遇到叶子
+        //取这条链末端叶子的 num_cells 作为位置
         //因为num cells值代表数量，所以第num cells个cell的位置就是最后一个cell的后一个位置
         //举例：5个苹果，数量是5，编号为0、1、2、3、4，那么编号为‘数量’的位置就是最后一个位置的后一个
 
@@ -450,6 +460,7 @@ class Table
             {
                 return iterator(*this,page,leaf_node_read_num_cells(node));
             }
+            //内部节点：最大的一批 key 都在最右子树里，继续往下走
             page = internal_node_read_right_child(node);
         }
         
@@ -458,9 +469,18 @@ class Table
 
     /**
      * @brief 使用key值在table中寻找对应的cell
-     * @todo 目前只实现了leaf node的查询操作
+     * @details 从根开始循环下降，对层数没有限制：
+     *          - 叶子：用 leaf_node_find_idx 二分定位
+     *          - 内部：用 internal_node_find_idx 定位，它返回的是"第一个 >= k"的
+     *                  下标；idx == num_keys 说明 k 比该节点所有分界键都大，
+     *                  走 right_child，否则走 child[idx]
+     * @note 两个 find_idx 返回的都是"位置"而不是"是否命中"：返回的 cell_num
+     *       可能等于叶子的 num_cells，表示"k 应插在末尾"。调用方必须自己比较
+     *       key 才能判断是否命中（见 Statement::INSERT_func）
+     * @todo 未命中时返回"插入位置"而不是 end()，语义上容易和迭代器终点混淆；
+     *       后续可以拆成 locate() + Table::insert()，把查重和定位收进 Table
      * @param k 用于查找的key值
-     * @return iterator 返回指向这个cell的迭代器
+     * @return iterator 命中时指向该 cell，未命中时指向它应当插入的位置
      */
     iterator find(uint32_t k)
     {
@@ -485,6 +505,8 @@ class Table
             //如果找到的位置等于num keys
             //也就是大于所有的cell
             //那么应该在right child里
+            //注意这里必须显式取 right_child，不能写成 read_child(node, cell_num)：
+            //cell_num == num_keys 时那条 cell 越界，读到的是陈旧字节
             if(cell_num == internal_node_read_num_keys(node))
             {
                 page_num = internal_node_read_right_child(node);
@@ -496,6 +518,8 @@ class Table
                 page_num = internal_node_read_child(node, cell_num);    
             }
         }
+        //循环里每个分支都会 return，这里是不可达代码；
+        //保留只是为了满足"非 void 函数必须有返回值"的编译检查
         throw std::runtime_error("Table::find(): Unknown Error!");
 
         
