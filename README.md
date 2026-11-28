@@ -4,66 +4,90 @@
    稳定版在 `main`。
 
 ## 目标
-补完 B+ 树分裂：内部节点访问器 → 根分裂 → 父节点挂接 → 内部节点分裂 → 递归查找
+补完 B+ 树：内部节点访问器 → 根分裂 → 递归查找 → 迭代器跨页 → 父节点挂接 → 内部节点分裂
 
 ## 已完成
 
-- 内部节点访问器、`leaf_node_insert`、`internal_node_insert`
-- `Table::create_new_root()`：根分裂（14 行插入不再崩溃，页 0 已变为 INTERNAL）
-- `Table::find()`：改为循环下降，支持任意层数的内部节点
-  （`idx == num_keys` 时走 `right_child`，否则走 `child[idx]`）
-- `Table::end()`：沿 `right_child` 下到最右叶子，不再误读内部节点的 `num_keys`
-- 连续插入 100 条通过，无 assert 中断
+- 内部节点访问器、`leaf_node_insert`、`internal_node_insert`（含"新孩子当最右 → 原 right_child 降级"）
+- `Table::create_new_root()`：根分裂（第 14 行插入不再崩溃，页 0 变为 INTERNAL）
+- `Table::find()`：循环下降，支持任意层内部节点（`idx == num_keys` 走 `right_child`）
+- `Table::end()`：沿 `right_child` 下到最右叶子
+- `Table::begin()`：沿 `child[0]` 下到最左叶子
+- `Table::next_leaf_page()`：靠父指针上溯、用分界键定位兄弟、再下潜到最左叶子
+- `operator++`：页内前进 → 本叶末尾跳下一页 → 全表末尾把 `cell_num` 置为 `num_cells` 归位到 `end()`
+- `get_max_key()`：叶子取最后一条，内部节点沿 `right_child` 递归到底
+
+## 当前状态（重要）
+
+`select` 的输出**只覆盖根节点可达的那部分叶子**。原因不是遍历写错，而是非根分裂还没做：
+
+```
+插入 100 行 → 12 次 "Need to implement updating parent after split"
+             叶子分裂已经完成、数据已落盘，但父节点没有收到新的 (max_key, child)
+             → 这些叶子成为孤儿页，根里没有指向它们的 cell
+```
+
+实测（`select` 条数 = 可达叶子的 cell 之和，说明遍历本身正确）：
+
+| 插入行数 | 物理 cell 和 | 可达叶子 | `select` 输出 | 升序 |
+|---|---|---|---|---|
+| 14 | 14 | p2=7, p1=7 | 14 | ✓ |
+| 40 | 40 | p2=7, p1=12 | 19 | ✓ |
+| 65 | 65 | p2=7, p1=9 | 16 | ✓ |
+| 130 | 130 | p2=7, p1=11 | 18 | ✓ |
 
 ## 下一步（按顺序）
 
-1. 迭代器跨页：`begin()` 下到最左叶子；`operator++` 走到 `num_cells` 后跳下一页
-   （两种方案：叶子加 `next_leaf` 字段，或迭代器内维护路径栈）
-2. `select` 验证：顺序严格递增、条数等于插入条数
-3. 非根分裂：新增 `update_internal_node_key()`，分裂后更新父节点里的 key 并插入新 cell；
-   父节点满则继续分裂内部节点（最终递归回 `create_new_root`）
-4. `.btree` 按节点类型递归打印每一层
+1. **Part 13：父节点更新（非根分裂）** —— 这是当前唯一的数据正确性问题
+   - 新增 `update_internal_node_key(parent, old_key, new_key)`
+   - `leaf_node_split_and_insert` 里：`old_is_root` 走 `create_new_root`，
+     否则先改旧页在父里的分界键，再 `internal_node_insert(parent, 新页最大键, 新页)`
+   - 父节点满时先 `assert`，等 Part 14
+2. **Part 14：内部节点分裂** + `.btree` 按节点类型递归打印
+3. 验收：`INTERNAL_NODE_MAX_CELLS` 临时改 3，插 200 行不崩、三层树 `select` 条数正确
+
+做完以上三项，`v0.3.0` 合并回 `main`。之后进入存储引擎改造（见下方"后续路线"）。
 
 ## 当前卡点
 
 - [X] `Table.hpp`、`Node.hpp` 契约注释
-- [X] `Table::create_new_root()` 根分裂
-- [X] `find()` 对内部节点的下降查找（15 行起插入已通过，100 行验证）
-- [X] `end()` 下到最右叶子
-- [ ] `select` 结果不正确：`begin()` 仍假设根是叶子，迭代器不跨页
-- [ ] 三层结构未验证：扇出 511，100 行仍只有 2 层
+- [X] `create_new_root()` 根分裂
+- [X] `find()` 内部节点下降
+- [X] `begin()` / `end()` 定位到最左 / 最右叶子
+- [X] 迭代器跨页（`operator++` + `next_leaf_page`）
+- [X] 两层树 `select` 顺序与条数正确
+- [ ] 非根分裂未实现 → 孤儿页、`select` 少行（Part 13）
+- [ ] 内部节点分裂未实现 → 三层树无法构造（Part 14）
 - [ ] `.btree` 只打印根页，无法验证多层结构
-- [ ] 未验证：插入的 key 超过某子树当前最大值时，祖先节点里的 max key 没有更新
-      （内部键是「快照」，不改会导致 find 走错分支、插入重复数据）
-- [ ] 非根分裂未实现：叶子分裂后父节点没有收到新的 (max_key, child) cell
+- [ ] 三层树的 `next_leaf_page` 下潜路径未经实测（代码已写，无法构造三层来验证）
 
 ## 已知隐患
 
-- `find()` 的插入位置与 `end()` 恰好相等的性质，依赖 **没有删除 / 节点合并**。
-  做了 delete 之后，`num_cells` 位置会出现在非最右叶子，届时需要改用哨兵
-  `INVALID_PAGE_NUM` 表示 `end()`。
-- `leaf_node_find_idx` / `internal_node_find_idx` 返回的是「第一个 >= k」的位置，
-  不是「命中」；找到叶子后必须再做一次相等判断，才算命中。
-- 内部节点里 `idx == num_keys` 时不能用 `read_child(node, idx)`，那会读到陈旧字节，
-  必须显式走 `right_child`。
+- **不变量**：内部节点 `cell[i].key` 恰好等于 `child[i]` 子树的最大 rowid。
+  插入不会破坏它（按"第一个 ≥ k"路由，能落入某孩子的键必然不超过它的分界键；
+  只有最右孩子会变大，而它不存键）。**分裂必须维护它**：旧页最大值变小要改键，
+  新页要插入一条 `(新页最大键, 新页)` 的 cell。写错会导致 `find` 走错分支、
+  `next_leaf_page` 跳到错误的兄弟页——且不会报错，只是少几行数据。
+- `find()` 未命中的"插入位置"与 `end()` **恰好相等**，这个等式依赖 **没有删除**。
+  做了 delete 之后 `num_cells` 位置会出现在非最右叶子，必须改用 `INVALID_PAGE_NUM` 作哨兵。
+- `next_leaf_page()` 依赖页头的 `parent` 指针，且删除后可能出现空叶子
+  （`get_max_key` 会对空叶子断言），届时定位方式要与删除/合并一起重做。
+- 所有测试库必须 **`rm -f` 新建**。复用旧库会把上一轮的孤儿页当成"这轮的结果"。
 
-## 验收标准（满足才算完成）
-- [ ] INTERNAL_NODE_MAX_CELLS=3 时插 200 行不崩
-- [ ] `.btree` 打印每一层的 keys
-- [ ] `select` 顺序严格递增、条数正确
-- [ ] 改回 510 后同样通过
+## 后续路线（合并 main 之后）
 
-## 注意事项（仅本分支）
+存储层按 SQLite 官方页格式重做，详细步骤见 `毕设进度\Part之后教程\`：
 
-- 本分支是开发版，**不稳定**：`select` 仍不可用（迭代器不跨页）
-- 不要在 `main` 上直接改代码，稳定版在 `main`
-- 每次提交前先 `git status` 确认工作区干净
-- 完成一个小项就 commit，不要攒到最后
-- 切分支前必须先把改动提交或还原，未提交的改动会被带到另一条分支
+1. 页格式与记录编码：100B 文件头、槽目录、serial type、overflow 链、freeblock、游标路径栈
+2. LRU 缓冲区：帧池、脏页、钉住、淘汰写回
+3. 删除与范围查询：借用、合并、根塌陷、freelist
+4. SQL 前端：词法 + LL(1) 递归下降 + AST + 执行引擎
+5. 目录与多表：`cuadb_master` 自举、约束检查
+6. Lua 扩展引擎：嵌入、函数注册表、值封送、安全沙箱
 
 ## 合并到 main 的步骤（验收通过后再做）
 
-1. 对照文首的「验收标准」，四项全部通过
+1. 对照"下一步"三项全部通过
 2. `git checkout main && git pull`
 3. `git merge feature/btree`
 4. 遇到 `CONFLICT (add/add): README.md` 是正常的，保留 main 的版本：
